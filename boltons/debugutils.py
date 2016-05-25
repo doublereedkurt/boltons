@@ -105,7 +105,7 @@ def trace_module(modules):
 
     def trace(frame, event, arg):
         if event == 'line':
-            print frame.f_code.co_filename, frame.f_code.co_name, frame.f_lineno
+            print(frame.f_code.co_filename, frame.f_code.co_name, frame.f_lineno)
         if event == 'call':
             if id(frame.f_globals) in globalses:
                 return trace
