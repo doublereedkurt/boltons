@@ -2,7 +2,7 @@
 
 *boltons should be builtins.*
 
-**Boltons** is a set of over 100 BSD-licensed, pure-Python utilities
+**Boltons** is a set of over 160 BSD-licensed, pure-Python utilities
 in the same spirit as — and yet conspicuously missing from —
 [the standard library][stdlib], including:
 
@@ -10,12 +10,15 @@ in the same spirit as — and yet conspicuously missing from —
   * A highly-optimized [OrderedMultiDict][omd], in [dictutils][dictutils]
   * *Two* types of [PriorityQueue][pq], in [queueutils][queueutils]
   * [Chunked][chunked] and [windowed][windowed] iteration, in [iterutils][iterutils]
+  * Recursive data structure [iteration and merging][remap], with [iterutils.remap][iterutils.remap]
+  * Exponential backoff functionality, including jitter, through [iterutils.backoff][iterutils.backoff]
   * A full-featured [TracebackInfo][tbinfo] type, for representing stack traces,
     in [tbutils][tbutils]
 
-Boltons is tested against Python 2.6, 2.7, 3.4, and
-PyPy. [Full and extensive docs are available on Read The Docs.][rtd]
-See what's new [by checking the CHANGELOG][changelog].
+**[Full and extensive docs are available on Read The Docs.][rtd]** See
+what's new [by checking the CHANGELOG][changelog].
+
+Boltons is tested against Python 2.6, 2.7, 3.4, 3.5, and PyPy.
 
 [stdlib]: https://docs.python.org/2.7/library/index.html
 [rtd]: https://boltons.readthedocs.org/en/latest/
@@ -32,7 +35,11 @@ See what's new [by checking the CHANGELOG][changelog].
 [dictutils]: https://boltons.readthedocs.org/en/latest/dictutils.html#module-boltons.dictutils
 [queueutils]: https://boltons.readthedocs.org/en/latest/queueutils.html#module-boltons.queueutils
 [iterutils]: https://boltons.readthedocs.org/en/latest/iterutils.html#module-boltons.iterutils
+[iterutils.remap]: http://boltons.readthedocs.org/en/latest/iterutils.html#boltons.iterutils.remap
+[iterutils.backoff]: http://boltons.readthedocs.org/en/latest/iterutils.html#boltons.iterutils.backoff
 [tbutils]: https://boltons.readthedocs.org/en/latest/tbutils.html#module-boltons.tbutils
+
+[remap]: http://sedimental.org/remap.html
 
 ## Installation
 
@@ -50,9 +57,11 @@ Then, [thanks to PyPI][boltons_pypi], dozens of boltons are just an import away:
 ```
 
 However, due to the nature of utilities, application developers might
-want to consider other options. Boltons is pure-Python and has no
-dependencies. See the [Integration][integration] section of the docs
-for more details.
+want to consider other options, including vendorization of individual
+modules into a project. Boltons is pure-Python and has no
+dependencies. If the whole project is too big, each module is
+independent, and can be copied directly into a project. See the
+[Integration][integration] section of the docs for more details.
 
 [boltons_pypi]: https://pypi.python.org/pypi/boltons
 [integration]: https://boltons.readthedocs.org/en/latest/architecture.html#integration

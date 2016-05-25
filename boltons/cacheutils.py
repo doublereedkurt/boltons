@@ -16,35 +16,31 @@ statistics are:
     the cache
   * ``miss_count`` - the number of times a key has been absent and/or
     fetched by the cache
-
   * ``soft_miss_count`` - the number of times a key has been absent,
     but a default has been provided by the caller, as with
     :meth:`dict.get` and :meth:`dict.setdefault`. Soft misses are a
     subset of misses, so this number is always less than or equal to
     ``miss_count``.
 
-Additionally, ``cacheutils`` the cache-like bounded counter,
-:class:`ThresholdCounter`.
+Additionally, ``cacheutils`` provides :class:`ThresholdCounter`, a
+cache-like bounded counter useful for online statistics collection.
 
 Learn more about `caching algorithms on Wikipedia
 <https://en.wikipedia.org/wiki/Cache_algorithms#Examples>`_.
 
 """
 
-# TODO: clarify soft_miss_count. is it for .get and .set_default or is
-# it for when on_miss provides a value. also, should on_miss itself be
-# allowed to raise a KeyError
-
 # TODO: TimedLRI
 # TODO: support 0 max_size?
-__all__ = ['LRI', 'LRU', 'cached', 'ThresholdCache']
+
 
 import itertools
 from collections import deque
+from operator import attrgetter
 
 try:
-    from _thread import RLock
-except:
+    from threading import RLock
+except Exception:
     class RLock(object):
         'Dummy reentrant lock for builds without threads'
         def __enter__(self):
@@ -54,7 +50,7 @@ except:
             pass
 
 try:
-    from typeutils import make_sentinel
+    from boltons.typeutils import make_sentinel
     _MISSING = make_sentinel(var_name='_MISSING')
     _KWARG_MARK = make_sentinel(var_name='_KWARG_MARK')
 except ImportError:
@@ -64,7 +60,9 @@ except ImportError:
 try:
     xrange
 except NameError:
+    # py3
     xrange = range
+    unicode, str, bytes, basestring = str, bytes, bytes, (str, bytes)
 
 PREV, NEXT, KEY, VALUE = range(4)   # names for the link fields
 DEFAULT_MAX_SIZE = 128
@@ -110,11 +108,8 @@ class LRU(dict):
             raise ValueError('expected max_size > 0, not %r' % max_size)
         self.hit_count = self.miss_count = self.soft_miss_count = 0
         self.max_size = max_size
-        root = []
-        root[:] = [root, root, None, None]
-        self.link_map = {}
-        self.root = root
-        self.lock = RLock()
+        self._lock = RLock()
+        self._init_ll()
 
         if on_miss is not None and not callable(on_miss):
             raise TypeError('expected on_miss to be a callable'
@@ -126,36 +121,102 @@ class LRU(dict):
 
     # TODO: fromkeys()?
 
-    def __setitem__(self, key, value):
-        with self.lock:
-            root = self.root
-            if len(self) < self.max_size:
-                # to the front of the queue
-                last = root[PREV]
-                link = [last, root, key, value]
-                last[NEXT] = root[PREV] = link
-                self.link_map[key] = link
-                super(LRU, self).__setitem__(key, value)
-            else:
-                # Use the old root to store the new key and result.
-                oldroot = root
-                oldroot[KEY] = key
-                oldroot[VALUE] = value
-                # prevent ref counts going to zero during update
-                self.root = root = oldroot[NEXT]
-                oldkey, oldresult = root[KEY], root[VALUE]
-                root[KEY] = root[VALUE] = None
-                # Now update the cache dictionary.
-                del self.link_map[oldkey]
-                super(LRU, self).__delitem__(oldkey)
-                self.link_map[key] = oldroot
-                super(LRU, self).__setitem__(key, value)
+    # linked list manipulation methods.
+    #
+    # invariants:
+    # 1) 'anchor' is the sentinel node in the doubly linked list.  there is
+    #    always only one, and its KEY and VALUE are both _MISSING.
+    # 2) the most recently accessed node comes immediately before 'anchor'.
+    # 3) the least recently accessed node comes immediately after 'anchor'.
+    def _init_ll(self):
+        anchor = []
+        anchor[:] = [anchor, anchor, _MISSING, _MISSING]
+        # a link lookup table for finding linked list links in O(1)
+        # time.
+        self._link_lookup = {}
+        self._anchor = anchor
+
+    def _print_ll(self):
+        link = self._anchor
+        print('***')
+        while True:
+            print(link[KEY], link[VALUE])
+            link = link[NEXT]
+            if link is self._anchor:
+                break
+        print('***')
         return
 
-    def __getitem__(self, key):
-        with self.lock:
+    def _get_link_and_move_to_front_of_ll(self, key):
+        # find what will become the newest link. this may raise a
+        # KeyError, which is useful to __getitem__ and __setitem__
+        newest = self._link_lookup[key]
+
+        # splice out what will become the newest link.
+        newest[PREV][NEXT] = newest[NEXT]
+        newest[NEXT][PREV] = newest[PREV]
+
+        # move what will become the newest link immediately before
+        # anchor (invariant 2)
+        anchor = self._anchor
+        second_newest = anchor[PREV]
+        second_newest[NEXT] = anchor[PREV] = newest
+        newest[PREV] = second_newest
+        newest[NEXT] = anchor
+        return newest
+
+    def _set_key_and_add_to_front_of_ll(self, key, value):
+        # create a new link and place it immediately before anchor
+        # (invariant 2).
+        anchor = self._anchor
+        second_newest = anchor[PREV]
+        newest = [second_newest, anchor, key, value]
+        second_newest[NEXT] = anchor[PREV] = newest
+        self._link_lookup[key] = newest
+
+    def _set_key_and_evict_last_in_ll(self, key, value):
+        # the link after anchor is the oldest in the linked list
+        # (invariant 3).  the current anchor becomes a link that holds
+        # the newest key, and the oldest link becomes the new anchor
+        # (invariant 1).  now the newest link comes before anchor
+        # (invariant 2).  no links are moved; only their keys
+        # and values are changed.
+        oldanchor = self._anchor
+        oldanchor[KEY] = key
+        oldanchor[VALUE] = value
+
+        self._anchor = anchor = oldanchor[NEXT]
+        evicted = anchor[KEY]
+        anchor[KEY] = anchor[VALUE] = _MISSING
+        del self._link_lookup[evicted]
+        self._link_lookup[key] = oldanchor
+        return evicted
+
+    def _remove_from_ll(self, key):
+        # splice a link out of the list and drop it from our lookup
+        # table.
+        link = self._link_lookup.pop(key)
+        link[PREV][NEXT] = link[NEXT]
+        link[NEXT][PREV] = link[PREV]
+
+    def __setitem__(self, key, value):
+        with self._lock:
             try:
-                link = self.link_map[key]
+                link = self._get_link_and_move_to_front_of_ll(key)
+            except KeyError:
+                if len(self) < self.max_size:
+                    self._set_key_and_add_to_front_of_ll(key, value)
+                else:
+                    evicted = self._set_key_and_evict_last_in_ll(key, value)
+                    super(LRU, self).__delitem__(evicted)
+                super(LRU, self).__setitem__(key, value)
+            else:
+                link[VALUE] = value
+
+    def __getitem__(self, key):
+        with self._lock:
+            try:
+                link = self._get_link_and_move_to_front_of_ll(key)
             except KeyError:
                 self.miss_count += 1
                 if not self.on_miss:
@@ -164,16 +225,7 @@ class LRU(dict):
                 return ret
 
             self.hit_count += 1
-            # Move the link to the front of the queue
-            root = self.root
-            link_prev, link_next, _key, value = link
-            link_prev[NEXT] = link_next
-            link_next[PREV] = link_prev
-            last = root[PREV]
-            last[NEXT] = root[PREV] = link
-            link[PREV] = last
-            link[NEXT] = root
-            return value
+            return link[VALUE]
 
     def get(self, key, default=None):
         try:
@@ -183,67 +235,71 @@ class LRU(dict):
             return default
 
     def __delitem__(self, key):
-        with self.lock:
-            link = self.link_map.pop(key)
+        with self._lock:
             super(LRU, self).__delitem__(key)
-            link[PREV][NEXT], link[NEXT][PREV] = link[NEXT], link[PREV]
+            self._remove_from_ll(key)
 
     def pop(self, key, default=_MISSING):
         # NB: hit/miss counts are bypassed for pop()
-        try:
-            ret = super(LRU, self).__getitem__(key)
-            del self[key]
-        except KeyError:
-            if default is _MISSING:
-                raise KeyError(key)
-            ret = default
-        return ret
+        with self._lock:
+            try:
+                ret = super(LRU, self).pop(key)
+            except KeyError:
+                if default is _MISSING:
+                    raise
+                ret = default
+            else:
+                self._remove_from_ll(key)
+            return ret
 
     def popitem(self):
-        with self.lock:
-            key, link = self.link_map.popitem()
-            super(LRU, self).__delitem__(link[KEY])
-            link[PREV][NEXT], link[NEXT][PREV] = link[NEXT], link[PREV]
-            return key, link[VALUE]
+        with self._lock:
+            item = super(LRU, self).popitem()
+            self._remove_from_ll(item[0])
+            return item
 
     def clear(self):
-        with self.lock:
-            self.root = [self.root, self.root, None, None]
-            self.link_map.clear()
+        with self._lock:
             super(LRU, self).clear()
+            self._init_ll()
 
     def copy(self):
         return self.__class__(max_size=self.max_size, values=self)
 
     def setdefault(self, key, default=None):
-        try:
-            return self[key]
-        except KeyError:
-            self.soft_miss_count += 1
-            self[key] = default
-            return default
+        with self._lock:
+            try:
+                return self[key]
+            except KeyError:
+                self.soft_miss_count += 1
+                self[key] = default
+                return default
 
     def update(self, E, **F):
         # E and F are throwback names to the dict() __doc__
-        if E is self:
+        with self._lock:
+            if E is self:
+                return
+            setitem = self.__setitem__
+            if callable(getattr(E, 'keys', None)):
+                for k in E.keys():
+                    setitem(k, E[k])
+            else:
+                for k, v in E:
+                    setitem(k, v)
+            for k in F:
+                setitem(k, F[k])
             return
-        setitem = self.__setitem__
-        if callable(getattr(E, 'keys', None)):
-            for k in E.keys():
-                setitem(k, E[k])
-        else:
-            for k, v in E:
-                setitem(k, v)
-        for k in F:
-            setitem(k, F[k])
-        return
 
     def __eq__(self, other):
-        if self is other:
-            return True
-        if len(other) != len(self):
-            return False
-        return other == self
+        with self._lock:
+            if self is other:
+                return True
+            if len(other) != len(self):
+                return False
+            if not isinstance(other, LRU):
+                return other == self
+            return super(LRU, self).__eq__(other)
 
     def __ne__(self, other):
         return not (self == other)
@@ -365,12 +421,16 @@ class _HashedKey(list):
     def __hash__(self):
         return self.hash_value
 
+    def __repr__(self):
+        return '%s(%s)' % (self.__class__.__name__, list.__repr__(self))
 
-def _make_cache_key(args, kwargs, typed=False, kwarg_mark=_KWARG_MARK,
-                    fasttypes=frozenset([int, str, frozenset, type(None)])):
-    """Make a cache key from optionally typed positional and keyword
-    arguments. If *typed* is ``True``, ``3`` and ``3.0`` will be
-    treated as separate keys.
+
+def make_cache_key(args, kwargs, typed=False, kwarg_mark=_KWARG_MARK,
+                   fasttypes=frozenset([int, str, frozenset, type(None)])):
+    """Make a generic key from a function's positional and keyword
+    arguments, suitable for use in caches. Arguments within *args* and
+    *kwargs* must be `hashable`_. If *typed* is ``True``, ``3`` and
+    ``3.0`` will be treated as separate keys.
 
     The key is constructed in a way that is flat as possible rather than
     as a nested structure that would take more memory.
@@ -378,6 +438,11 @@ def _make_cache_key(args, kwargs, typed=False, kwarg_mark=_KWARG_MARK,
     If there is only a single argument and its data type is known to cache
     its hash value, then that argument is returned without a wrapper.  This
     saves space and improves lookup speed.
+
+    >>> tuple(make_cache_key(('a', 'b'), {'c': ('d')}))
+    ('a', 'b', _KWARG_MARK, ('c', 'd'))
+
+    .. _hashable: https://docs.python.org/2/glossary.html#term-hashable
     """
     key = list(args)
     if kwargs:
@@ -392,19 +457,36 @@ def _make_cache_key(args, kwargs, typed=False, kwarg_mark=_KWARG_MARK,
         return key[0]
     return _HashedKey(key)
 
+# for backwards compatibility in case someone was importing it
+_make_cache_key = make_cache_key
+
 
 class CachedFunction(object):
+    """This type is used by :func:`cached`, below. Instances of this
+    class are used to wrap functions in caching logic.
+    """
     def __init__(self, func, cache, typed=False):
         self.func = func
-        self.cache = cache
+        if callable(cache):
+            self.get_cache = cache
+        elif not (callable(getattr(cache, '__getitem__', None))
+                  and callable(getattr(cache, '__setitem__', None))):
+            raise TypeError('expected cache to be a dict-like object,'
+                            ' or callable returning a dict-like object, not %r'
+                            % cache)
+        else:
+            def _get_cache():
+                return cache
+            self.get_cache = _get_cache
         self.typed = typed
 
     def __call__(self, *args, **kwargs):
-        key = _make_cache_key(args, kwargs, typed=self.typed)
+        cache = self.get_cache()
+        key = make_cache_key(args, kwargs, typed=self.typed)
         try:
-            ret = self.cache[key]
+            ret = cache[key]
         except KeyError:
-            ret = self.cache[key] = self.func(*args, **kwargs)
+            ret = cache[key] = self.func(*args, **kwargs)
         return ret
 
     def __repr__(self):
@@ -414,14 +496,71 @@ class CachedFunction(object):
         return "%s(func=%r)" % (cn, self.func)
 
 
+class CachedMethod(object):
+    """Similar to :class:`CachedFunction`, this type is used by
+    :func:`cachedmethod` to wrap methods in caching logic.
+    """
+    def __init__(self, func, cache, typed=False, selfish=True):
+        self.func = func
+        if isinstance(cache, basestring):
+            self.get_cache = attrgetter(cache)
+        elif callable(cache):
+            self.get_cache = cache
+        elif not (callable(getattr(cache, '__getitem__', None))
+                  and callable(getattr(cache, '__setitem__', None))):
+            raise TypeError('expected cache to be an attribute name,'
+                            ' dict-like object, or callable returning'
+                            ' a dict-like object, not %r'
+                            % cache)
+        else:
+            def _get_cache(obj):
+                return cache
+            self.get_cache = _get_cache
+        self.typed = typed
+        self.selfish = selfish
+        self.bound_to = None
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        cls = self.__class__
+        ret = cls(self.func, self.get_cache,
+                  typed=self.typed, selfish=self.selfish)
+        ret.bound_to = obj
+        return ret
+
+    def __call__(self, *args, **kwargs):
+        obj = args[0] if self.bound_to is None else self.bound_to
+        cache = self.get_cache(obj)
+        key_args = (self.bound_to,) + args if self.selfish else args
+        key = make_cache_key(key_args, kwargs, typed=self.typed)
+        try:
+            ret = cache[key]
+        except KeyError:
+            if self.bound_to is not None:
+                args = (self.bound_to,) + args
+            ret = cache[key] = self.func(*args, **kwargs)
+        return ret
+
+    def __repr__(self):
+        cn = self.__class__.__name__
+        args = (cn, self.func, self.typed, self.selfish)
+        if self.bound_to is not None:
+            args += (self.bound_to,)
+            return ('<%s func=%r typed=%r selfish=%r bound_to=%r>' % args)
+        return ("%s(func=%r, typed=%r, selfish=%r)" % args)
+
+
 def cached(cache, typed=False):
-    """Cache any function with the cache instance of your choosing. Note
+    """Cache any function with the cache object of your choosing. Note
     that the function wrapped should take only `hashable`_ arguments.
 
     Args:
         cache (Mapping): Any :class:`dict`-like object suitable for
             use as a cache. Instances of the :class:`LRU` and
-            :class:`LRI` are good choices.
+            :class:`LRI` are good choices, but a plain :class:`dict`
+            can work in some cases, as well. This argument can also be
+            a callable which accepts no arguments and returns a mapping.
         typed (bool): Whether to factor argument types into the cache
             check. Default ``False``, setting to ``True`` causes the
             cache keys for ``3`` and ``3.0`` to be considered unequal.
@@ -437,10 +576,72 @@ def cached(cache, typed=False):
     1
 
     .. _hashable: https://docs.python.org/2/glossary.html#term-hashable
+
     """
     def cached_func_decorator(func):
         return CachedFunction(func, cache, typed=typed)
     return cached_func_decorator
+
+
+def cachedmethod(cache, typed=False, selfish=True):
+    """Similar to :func:`cached`, ``cachedmethod`` is used to cache
+    methods based on their arguments, using any :class:`dict`-like
+    *cache* object.
+
+    Args:
+        cache (str/Mapping/callable): Can be the name of an attribute
+            on the instance, any Mapping/:class:`dict`-like object, or
+            a callable which returns a Mapping.
+        typed (bool): Whether to factor argument types into the cache
+            check. Default ``False``, setting to ``True`` causes the
+            cache keys for ``3`` and ``3.0`` to be considered unequal.
+        selfish (bool): Whether an instance's ``self`` argument should
+            be considered in the cache key. Use this to share cache
+            objects across instances.
+
+    >>> class Lowerer(object):
+    ...     def __init__(self):
+    ...         self.cache = LRI()
+    ...
+    ...     @cachedmethod('cache')
+    ...     def lower(self, text):
+    ...         return text.lower()
+    ...
+    >>> lowerer = Lowerer()
+    >>> lowerer.lower('WOW WHO COULD GUESS CACHING COULD BE SO NEAT')
+    'wow who could guess caching could be so neat'
+    >>> len(lowerer.cache)
+    1
+    """
+    def cached_method_decorator(func):
+        return CachedMethod(func, cache, typed=typed, selfish=selfish)
+    return cached_method_decorator
+
+
+class cachedproperty(object):
+    """The ``cachedproperty`` is used similar to :class:`property`, except
+    that the wrapped method is only called once. This is commonly used
+    to implement lazy attributes.
+
+    After the property has been accessed, the value is stored on the
+    instance itself, using the same name as the cachedproperty. This
+    allows the cache to be cleared with :func:`delattr`, or through
+    manipulating the object's ``__dict__``.
+    """
+
+    def __init__(self, func):
+        self.func = func
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        value = self.func(obj)
+        setattr(obj, self.func.__name__, value)
+        return value
+
+    def __repr__(self):
+        cn = self.__class__.__name__
+        return '<%s func=%s>' % (cn, self.func)
 
 
 class ThresholdCounter(object):

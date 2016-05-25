@@ -10,12 +10,18 @@ shorter-named convenience form that returns a list. Some of the
 following are based on examples in itertools docs.
 """
 
-__all__ = ['is_iterable', 'is_scalar', 'split', 'split_iter', 'chunked',
-           'chunked_iter', 'windowed', 'windowed_iter', 'bucketize',
-           'partition', 'unique', 'unique_iter', 'one', 'first']
-
 import math
+import random
 import itertools
+from collections import Mapping, Sequence, Set, ItemsView
+
+try:
+    from typeutils import make_sentinel
+    _UNSET = make_sentinel('_UNSET')
+    _REMAP_EXIT = make_sentinel('_REMAP_EXIT')
+except ImportError:
+    _REMAP_EXIT = object()
+    _UNSET = object()
 
 try:
     from itertools import izip
@@ -228,18 +234,36 @@ def chunked_iter(src, size, **kw):
     return
 
 
-def pairwise(src, count=None, **kw):
-    """Convenience function for calling :func:`chunked` with *size* set to
-    2.
+def pairwise(src):
+    """Convenience function for calling :func:`windowed` on *src*, with
+    *size* set to 2.
+
+    >>> pairwise(range(5))
+    [(0, 1), (1, 2), (2, 3), (3, 4)]
+    >>> pairwise([])
+    []
+
+    The number of pairs is always one less than the number of elements
+    in the iterable passed in, except on empty inputs, which returns
+    an empty list.
     """
-    return chunked(src, 2, count, **kw)
+    return windowed(src, 2)
 
 
-def pairwise_iter(src, **kw):
-    """Convenience function for calling :func:`chunked_iter` with *size*
-    set to 2.
+def pairwise_iter(src):
+    """Convenience function for calling :func:`windowed_iter` on *src*,
+    with *size* set to 2.
+
+    >>> list(pairwise_iter(range(5)))
+    [(0, 1), (1, 2), (2, 3), (3, 4)]
+    >>> list(pairwise_iter([]))
+    []
+
+    The number of pairs is always one less than the number of elements
+    in the iterable passed in, or zero, when *src* is empty.
+
     """
-    return chunked_iter(src, 2, **kw)
+    return windowed_iter(src, 2)
 
 
 def windowed(src, size):
@@ -327,7 +351,7 @@ def frange(stop, start=None, step=1.0):
     return ret
 
 
-def backoff(start, stop, count=None, factor=2):
+def backoff(start, stop, count=None, factor=2.0, jitter=False):
     """Returns a list of geometrically-increasing floating-point numbers,
     suitable for usage with `exponential backoff`_. Exactly like
     :func:`backoff_iter`, but without the ``'repeat'`` option for
@@ -340,10 +364,11 @@ def backoff(start, stop, count=None, factor=2):
     """
     if count == 'repeat':
         raise ValueError("'repeat' supported in backoff_iter, not backoff")
-    return list(backoff_iter(start, stop, count=count, factor=factor))
+    return list(backoff_iter(start, stop, count=count,
+                             factor=factor, jitter=jitter))
 
 
-def backoff_iter(start, stop, count=None, factor=2):
+def backoff_iter(start, stop, count=None, factor=2.0, jitter=False):
     """Generates a sequence of geometrically-increasing floats, suitable
     for usage with `exponential backoff`_. Starts with *start*,
     increasing by *factor* until *stop* is reached, optionally
@@ -373,31 +398,67 @@ def backoff_iter(start, stop, count=None, factor=2):
               log(e)
               time.sleep(timeout)
 
-    An enhancement for large-scale systems would be to add variation
-    ("jitter") to the timeout value. This is done to avoid a
-    thundering herd on the receiving end of the network call.
+    An enhancement for large-scale systems would be to add variation,
+    or *jitter*, to timeout values. This is done to avoid a thundering
+    herd on the receiving end of the network call.
 
     Finally, for *count*, the special value ``'repeat'`` can be passed to
     continue yielding indefinitely.
 
+    Args:
+
+        start (float): Positive number for baseline.
+        stop (float): Positive number for maximum.
+        count (int): Number of steps before stopping
+            iteration. Defaults to the number of steps between *start* and
+            *stop*. Pass the string, `'repeat'`, to continue iteration
+            indefinitely.
+        factor (float): Rate of exponential increase. Defaults to `2.0`,
+            e.g., `[1, 2, 4, 8, 16]`.
+        jitter (float): A factor between `-1.0` and `1.0`, used to
+            uniformly randomize and thus spread out timeouts in a distributed
+            system, avoiding rhythm effects. Positive values use the base
+            backoff curve as a maximum, negative values use the curve as a
+            minimum. Set to 1.0 or `True` for a jitter approximating
+            Ethernet's time-tested backoff solution. Defaults to `False`.
+
     """
-    if start == 0:
-        raise ValueError('start must be >= 0, not %r' % start)
-    if not start < (start * factor):
-        raise ValueError('start * factor should be greater than start')
+    start = float(start)
     stop = float(stop)
+    factor = float(factor)
+    if start < 0.0:
+        raise ValueError('expected start >= 0, not %r' % start)
+    if factor < 1.0:
+        raise ValueError('expected factor >= 1.0, not %r' % factor)
+    if stop == 0.0:
+        raise ValueError('expected stop >= 0')
+    if stop < start:
+        raise ValueError('expected stop >= start, not %r' % stop)
     if count is None:
-        count = 1 + math.ceil(math.log(stop/start, factor))
+        denom = start if start else 1
+        count = 1 + math.ceil(math.log(stop/denom, factor))
+        count = count if start else count + 1
     if count != 'repeat' and count < 0:
-        raise ValueError('count must be greater than 0, not %r' % count)
-    cur, i = float(start), 0
+        raise ValueError('count must be positive or "repeat", not %r' % count)
+    if jitter:
+        jitter = float(jitter)
+        if not (-1.0 <= jitter <= 1.0):
+            raise ValueError('expected jitter -1 <= j <= 1, not: %r' % jitter)
+
+    cur, i = start, 0
     while count == 'repeat' or i < count:
-        yield cur
+        if not jitter:
+            cur_ret = cur
+        elif jitter:
+            cur_ret = cur - (cur * jitter * random.random())
+        yield cur_ret
         i += 1
-        if cur < stop:
+        if cur == 0:
+            cur = 1
+        elif cur < stop:
             cur *= factor
-            if cur > stop:
-                cur = stop
+        if cur > stop:
+            cur = stop
     return
 
 
@@ -514,7 +575,7 @@ def one(src, default=None, key=None):
     the given iterable *src* that evaluates to ``True``, as determined
     by callable *key*. If unset, *key* defaults to :class:`bool`. If
     no such objects are found, *default* is returned. If *default* is
-    not passed, ``None` is returned.
+    not passed, ``None`` is returned.
 
     If *src* has more than one object that evaluates to ``True``, or
     if there is no object that fulfills such condition, return
@@ -586,21 +647,48 @@ def first(iterable, default=None, key=None):
     return default
 
 
-from collections import Mapping, Sequence, Set, ItemsView
+def same(iterable, ref=_UNSET):
+    """``same()`` returns ``True`` when all values in *iterable* are
+    equal to one another, or optionally a reference value,
+    *ref*. Similar to :func:`all` and :func:`any` in that it evaluates
+    an iterable and returns a :class:`bool`. ``same()`` returns
+    ``True`` for empty iterables.
 
-try:
-    from typeutils import make_sentinel
-    _EXIT = make_sentinel('_EXIT')
-except ImportError:
-    _EXIT = object()
+    >>> same([])
+    True
+    >>> same([1])
+    True
+    >>> same(['a', 'a', 'a'])
+    True
+    >>> same(range(20))
+    False
+    >>> same([[], []])
+    True
+    >>> same([[], []], ref='test')
+    False
+
+    """
+    iterator = iter(iterable)
+    if ref is _UNSET:
+        try:
+            ref = next(iterator)
+        except StopIteration:
+            return True  # those that were there were all equal
+    for val in iterator:
+        if val != ref:
+            return False  # short circuit on first unequal value
+    return True
 
 
-def default_visit(key, value):
-    # print('visit(%r, %r)' % (key, value))
+def default_visit(path, key, value):
+    # print('visit(%r, %r, %r)' % (path, key, value))
     return key, value
 
+# enable the extreme: monkeypatching iterutils with a different default_visit
+_orig_default_visit = default_visit
 
-def default_enter(key, value):
+
+def default_enter(path, key, value):
     # print('enter(%r, %r)' % (key, value))
     try:
         iter(value)
@@ -617,8 +705,9 @@ def default_enter(key, value):
     return value, False
 
 
-def default_exit(new_items, new_parent, old_parent):
-    # print('exit(%r, %r, %r)' % (new_items, new_parent, old_collection))
+def default_exit(path, key, old_parent, new_parent, new_items):
+    # print('exit(%r, %r, %r, %r, %r)'
+    #       % (path, key, old_parent, new_parent, new_items))
     ret = new_parent
     if isinstance(new_parent, Mapping):
         new_parent.update(new_items)
@@ -640,10 +729,104 @@ def default_exit(new_items, new_parent, old_parent):
 
 
 def remap(root, visit=default_visit, enter=default_enter, exit=default_exit,
-          reraise_visit=True):
-    # TODO: documentation
-    # TODO: enter() returns preopulated collection
-    # TODO: enter() takes a fully-qualified key (aka path)
+          **kwargs):
+    """The remap ("recursive map") function is used to traverse and
+    transform nested structures. Lists, tuples, sets, and dictionaries
+    are just a few of the data structures nested into heterogenous
+    tree-like structures that are so common in programming.
+    Unfortunately, Python's built-in ways to manipulate collections
+    are almost all flat. List comprehensions may be fast and succinct,
+    but they do not recurse, making it tedious to apply quick changes
+    or complex transforms to real-world data.
+
+    remap goes where list comprehensions cannot.
+
+    Here's an example of removing all Nones from some data:
+
+    >>> from pprint import pprint
+    >>> reviews = {'Star Trek': {'TNG': 10, 'DS9': 8.5, 'ENT': None},
+    ...            'Babylon 5': 6, 'Dr. Who': None}
+    >>> pprint(remap(reviews, lambda p, k, v: v is not None))
+    {'Babylon 5': 6, 'Star Trek': {'DS9': 8.5, 'TNG': 10}}
+
+    Notice how both Nones have been removed despite the nesting in the
+    dictionary. Not bad for a one-liner, and that's just the beginning.
+    See `this remap cookbook`_ for more delicious recipes.
+
+    .. _this remap cookbook: http://sedimental.org/remap.html
+
+    remap takes four main arguments: the object to traverse and three
+    optional callables which determine how the remapped object will be
+    created.
+
+    Args:
+
+        root: The target object to traverse. By default, remap
+            supports iterables like :class:`list`, :class:`tuple`,
+            :class:`dict`, and :class:`set`, but any object traversable by
+            *enter* will work.
+        visit (callable): This function is called on every item in
+            *root*. It must accept three positional arguments, *path*,
+            *key*, and *value*. *path* is simply a tuple of parents'
+            keys. *visit* should return the new key-value pair. It may
+            also return ``True`` as shorthand to keep the old item
+            unmodified, or ``False`` to drop the item from the new
+            structure. *visit* is called after *enter*, on the new parent.
+
+            The *visit* function is called for every item in root,
+            including duplicate items. For traversable values, it is
+            called on the new parent object, after all its children
+            have been visited. The default visit behavior simply
+            returns the key-value pair unmodified.
+        enter (callable): This function controls which items in *root*
+            are traversed. It accepts the same arguments as *visit*: the
+            path, the key, and the value of the current item. It returns a
+            pair of the blank new parent, and an iterator over the items
+            which should be visited. If ``False`` is returned instead of
+            an iterator, the value will not be traversed.
+
+            The *enter* function is only called once per unique value. The
+            default enter behavior support mappings, sequences, and
+            sets. Strings and all other iterables will not be traversed.
+        exit (callable): This function determines how to handle items
+            once they have been visited. It gets the same three
+            arguments as the other functions -- *path*, *key*, *value*
+            -- plus two more: the blank new parent object returned
+            from *enter*, and a list of the new items, as remapped by
+            *visit*.
+
+            Like *enter*, the *exit* function is only called once per
+            unique value. The default exit behavior is to simply add
+            all new items to the new parent, e.g., using
+            :meth:`list.extend` and :meth:`dict.update` to add to the
+            new parent. Immutable objects, such as a :class:`tuple` or
+            :class:`namedtuple`, must be recreated from scratch, but
+            use the same type as the new parent passed back from the
+            *enter* function.
+        reraise_visit (bool): A pragmatic convenience for the *visit*
+            callable. When set to ``False``, remap ignores any errors
+            raised by the *visit* callback. Items causing exceptions
+            are kept. See examples for more details.
+
+    remap is designed to cover the majority of cases with just the
+    *visit* callable. While passing in multiple callables is very
+    empowering, remap is designed so very few cases should require
+    passing more than one function.
+
+    When passing *enter* and *exit*, it's common and easiest to build
+    on the default behavior. Simply add ``from boltons.iterutils import
+    default_enter`` (or ``default_exit``), and have your enter/exit
+    function call the default behavior before or after your custom
+    logic. See `this example`_.
+
+    Duplicate and self-referential objects (aka reference loops) are
+    automatically handled internally, `as shown here`_.
+
+    .. _this example: http://sedimental.org/remap.html#sort_all_lists
+    .. _as shown here: http://sedimental.org/remap.html#corner_cases
+
+    """
+    # TODO: improve argument formatting in sphinx doc
     # TODO: enter() return (False, items) to continue traverse but cancel copy?
     if not callable(visit):
         raise TypeError('visit expected callable, not: %r' % visit)
@@ -651,24 +834,27 @@ def remap(root, visit=default_visit, enter=default_enter, exit=default_exit,
         raise TypeError('enter expected callable, not: %r' % enter)
     if not callable(exit):
         raise TypeError('exit expected callable, not: %r' % exit)
+    reraise_visit = kwargs.pop('reraise_visit', True)
+    if kwargs:
+        raise TypeError('unexpected keyword arguments: %r' % kwargs.keys())
 
-    stack = [(None, root)]
-    registry = {}
+    path, registry, stack = (), {}, [(None, root)]
     new_items_stack = []
     while stack:
         key, value = stack.pop()
         id_value = id(value)
-        if key is _EXIT:
+        if key is _REMAP_EXIT:
             key, new_parent, old_parent = value
             id_value = id(old_parent)
-            value = exit(new_items_stack.pop(), new_parent, old_parent)
+            path, new_items = new_items_stack.pop()
+            value = exit(path, key, old_parent, new_parent, new_items)
             registry[id_value] = value
             if not new_items_stack:
                 continue
         elif id_value in registry:
             value = registry[id_value]
         else:
-            res = enter(key, value)
+            res = enter(path, key, value)
             try:
                 new_parent, new_items = res
             except TypeError:
@@ -678,63 +864,107 @@ def remap(root, visit=default_visit, enter=default_enter, exit=default_exit,
             if new_items is not False:
                 # traverse unless False is explicitly passed
                 registry[id_value] = new_parent
-                new_items_stack.append([])
-                stack.append((_EXIT, (key, new_parent, value)))
+                new_items_stack.append((path, []))
+                if value is not root:
+                    path += (key,)
+                stack.append((_REMAP_EXIT, (key, new_parent, value)))
                 if new_items:
                     stack.extend(reversed(list(new_items)))
                 continue
-        try:
-            visited_item = visit(key, value)
-        except:
-            if reraise_visit:
-                raise
-            visited_item = True
-        if visited_item is False:
-            continue  # drop
-        elif visited_item is True:
+        if visit is _orig_default_visit:
+            # avoid function call overhead by inlining identity operation
             visited_item = (key, value)
-        # TODO: typecheck?
-        #    raise TypeError('expected (key, value) from visit(),'
-        #                    ' not: %r' % visited_item)
+        else:
+            try:
+                visited_item = visit(path, key, value)
+            except Exception:
+                if reraise_visit:
+                    raise
+                visited_item = True
+            if visited_item is False:
+                continue  # drop
+            elif visited_item is True:
+                visited_item = (key, value)
+            # TODO: typecheck?
+            #    raise TypeError('expected (key, value) from visit(),'
+            #                    ' not: %r' % visited_item)
         try:
-            new_items_stack[-1].append(visited_item)
+            new_items_stack[-1][1].append(visited_item)
         except IndexError:
             raise TypeError('expected remappable root, not: %r' % root)
     return value
 
 
-"""The marker approach to solving self-reference problems in remap
-won't work because we can't rely on exit returning a
-traversable, mutable object. We may know that the marker is in the
-items going into exit but there's no guarantee it's not being
-filtered out or being made otherwise inaccessible for other reasons.
+class PathAccessError(KeyError, IndexError, TypeError):
+    # TODO: could maybe get fancy with an isinstance
+    # TODO: should accept an idx argument
+    def __init__(self, exc, seg, path):
+        self.exc = exc
+        self.seg = seg
+        self.path = path
 
-On the other hand, having enter return the new parent instance
-before it's populated is a pretty workable solution. The division of
-labor stays clear and exit still has some override powers. Also
-note that only mutable structures can have self references (unless
-getting really nasty with the Python C API). The downside is that
-enter must do a bit more work and in the case of immutable
-collections, the new collection is discarded, as a new one has to be
-created from scratch by exit. The code is still pretty clear
-overall.
+    def __repr__(self):
+        cn = self.__class__.__name__
+        return '%s(%r, %r, %r)' % (cn, self.exc, self.seg, self.path)
 
-Not that remap is supposed to be a speed demon, but here are some
-thoughts on performance. Memorywise, the registry grows linearly with
-the number of collections. The stack of course grows in proportion to
-the depth of the data. Many intermediate lists are created, but for
-most data list comprehensions are much faster than generators (and
-generator expressions). The ABC isinstance checks are going to be dog
-slow. As soon as a couple large enough use case cross my desk, I'll be
-sure to profile and optimize. It's not a question of if isinstance+ABC
-is slow, it's which pragmatic alternative passes tests while being
-faster.
+    def __str__(self):
+        return ('could not access %r from path %r, got error: %r'
+                % (self.seg, self.path, self.exc))
 
-TODO Examples:
 
-  * sort all lists
-  * normalize all keys
-  * convert all dicts to OrderedDicts
-  * drop all Nones
+def get_path(root, path, default=_UNSET):
+    """EAFP is great, but the error message on this isn't:
 
+    var_key = 'last_key'
+    x['key'][-1]['other_key'][var_key]
+    KeyError: 'last_key'
+
+    One of get_path's chief aims is to have a good exception that is
+    better than a plain old KeyError: 'missing_key'
+    """
+    # TODO: integrate default
+    # TODO: listify kwarg? to allow indexing into sets
+    # TODO: raise better error on not iterable?
+    if isinstance(path, basestring):
+        path = path.split('.')
+    cur = root
+    for seg in path:
+        try:
+            cur = cur[seg]
+        except (KeyError, IndexError) as exc:
+            raise PathAccessError(exc, seg, path)
+        except TypeError as exc:
+            # either string index in a list, or a parent that
+            # doesn't support indexing
+            try:
+                seg = int(seg)
+                cur = cur[seg]
+            except (ValueError, KeyError, IndexError, TypeError):
+                raise PathAccessError(exc, seg, path)
+    return cur
+
+# TODO: get_path/set_path
+# TODO: recollect()
+# TODO: reiter()
+
+"""
+May actually be faster to do an isinstance check for a str path
+
+$ python -m timeit -s "x = [1]" "x[0]"
+10000000 loops, best of 3: 0.0207 usec per loop
+$ python -m timeit -s "x = [1]" "try: x[0] \nexcept: pass"
+10000000 loops, best of 3: 0.029 usec per loop
+$ python -m timeit -s "x = [1]" "try: x[1] \nexcept: pass"
+1000000 loops, best of 3: 0.315 usec per loop
+# setting up try/except is fast, only around 0.01us
+# actually triggering the exception takes almost 10x as long
+
+$ python -m timeit -s "x = [1]" "isinstance(x, basestring)"
+10000000 loops, best of 3: 0.141 usec per loop
+$ python -m timeit -s "x = [1]" "isinstance(x, str)"
+10000000 loops, best of 3: 0.131 usec per loop
+$ python -m timeit -s "x = [1]" "try: x.split('.')\n except: pass"
+1000000 loops, best of 3: 0.443 usec per loop
+$ python -m timeit -s "x = [1]" "try: x.split('.') \nexcept AttributeError: pass"
+1000000 loops, best of 3: 0.544 usec per loop
 """

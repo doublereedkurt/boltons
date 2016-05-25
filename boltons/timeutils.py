@@ -23,7 +23,8 @@ degree of accuracy in corner cases, check out `pytz`_.
 import re
 import time
 import bisect
-from datetime import tzinfo, timedelta, datetime
+import operator
+from datetime import tzinfo, timedelta, date, datetime
 
 
 def total_seconds(td):
@@ -173,7 +174,8 @@ def _cardinalize_time_unit(unit, value):
 
 def decimal_relative_time(d, other=None, ndigits=0, cardinalize=True):
     """Get a tuple representing the relative time difference between two
-    :class:`~datetime.datetime` objects or one :class:`~datetime.datetime` and now.
+    :class:`~datetime.datetime` objects or one
+    :class:`~datetime.datetime` and now.
 
     Args:
         d (datetime): The first datetime object.
@@ -200,6 +202,7 @@ def decimal_relative_time(d, other=None, ndigits=0, cardinalize=True):
     (0.002, 'seconds')
     >>> decimal_relative_time(now, now - timedelta(days=900), ndigits=1)
     (-2.5, 'years')
+
     """
     if other is None:
         other = datetime.utcnow()
@@ -245,6 +248,120 @@ def relative_time(d, other=None, ndigits=0):
     if drt < 0:
         phrase = 'from now'
     return '%g %s %s' % (abs(drt), unit, phrase)
+
+
+def strpdate(string, format):
+    """Parse the date string according to the format in `format`.  Returns a
+    :class:`date` object.  Internally, :meth:`datetime.strptime` is used to
+    parse the string and thus conversion specifiers for time fields (e.g. `%H`)
+    may be provided;  these will be parsed but ignored.
+
+    Args:
+        string (str): The date string to be parsed.
+        format (str): The `strptime`_-style date format string.
+    Returns:
+        datetime.date
+
+    .. _`strptime`: https://docs.python.org/2/library/datetime.html#strftime-strptime-behavior
+
+    >>> strpdate('2016-02-14', '%Y-%m-%d')
+    datetime.date(2016, 2, 14)
+    >>> strpdate('26/12 (2015)', '%d/%m (%Y)')
+    datetime.date(2015, 12, 26)
+    >>> strpdate('20151231 23:59:59', '%Y%m%d %H:%M:%S')
+    datetime.date(2015, 12, 31)
+    >>> strpdate('20160101 00:00:00.001', '%Y%m%d %H:%M:%S.%f')
+    datetime.date(2016, 1, 1)
+    """
+    whence = datetime.strptime(string, format)
+    return whence.date()
+
+
+def daterange(start, stop, step=1, inclusive=False):
+    """In the spirit of :func:`range` and :func:`xrange`, the `daterange`
+    generator that yields a sequence of :class:`~datetime.date`
+    objects, starting at *start*, incrementing by *step*, until *stop*
+    is reached.
+
+    When *inclusive* is True, the final date may be *stop*, **if**
+    *step* falls evenly on it. By default, *step* is one day. See
+    details below for many more details.
+
+    Args:
+        start (datetime.date): The starting date The first value in
+            the sequence.
+        stop (datetime.date): The stopping date. By default not
+            included in return. Can be `None` to yield an infinite
+            sequence.
+        step (int): The value to increment *start* by to reach
+            *stop*. Can be an :class:`int` number of days, a
+            :class:`datetime.timedelta`, or a :class:`tuple` of integers,
+            `(year, month, day)`. Positive and negative *step* values
+            are supported.
+        inclusive (bool): Whether or not the *stop* date can be
+            returned. *stop* is only returned when a *step* falls evenly
+            on it.
+
+    >>> christmas = date(year=2015, month=12, day=25)
+    >>> boxing_day = date(year=2015, month=12, day=26)
+    >>> new_year = date(year=2016, month=1,  day=1)
+    >>> for day in daterange(christmas, new_year):
+    ...     print(repr(day))
+    datetime.date(2015, 12, 25)
+    datetime.date(2015, 12, 26)
+    datetime.date(2015, 12, 27)
+    datetime.date(2015, 12, 28)
+    datetime.date(2015, 12, 29)
+    datetime.date(2015, 12, 30)
+    datetime.date(2015, 12, 31)
+    >>> for day in daterange(christmas, boxing_day):
+    ...     print(repr(day))
+    datetime.date(2015, 12, 25)
+    >>> for day in daterange(date(2017, 5, 1), date(2017, 8, 1),
+    ...                      step=(0, 1, 0), inclusive=True):
+    ...     print(repr(day))
+    datetime.date(2017, 5, 1)
+    datetime.date(2017, 6, 1)
+    datetime.date(2017, 7, 1)
+    datetime.date(2017, 8, 1)
+
+    *Be careful when using stop=None, as this will yield an infinite
+    sequence of dates.*
+    """
+    if not isinstance(start, date):
+        raise TypeError("start expected datetime.date instance")
+    if stop and not isinstance(stop, date):
+        raise TypeError("stop expected datetime.date instance or None")
+    try:
+        y_step, m_step, d_step = step
+    except TypeError:
+        y_step, m_step, d_step = 0, 0, step
+    else:
+        y_step, m_step = int(y_step), int(m_step)
+    if isinstance(d_step, int):
+        d_step = timedelta(days=int(d_step))
+    elif isinstance(d_step, timedelta):
+        pass
+    else:
+        raise ValueError('step expected int, timedelta, or tuple'
+                         ' (year, month, day), not: %r' % step)
+
+    if stop is None:
+        finished = lambda t: False
+    elif start < stop:
+        finished = operator.gt if inclusive else operator.ge
+    else:
+        finished = operator.lt if inclusive else operator.le
+    now = start
+
+    while not finished(now, stop):
+        yield now
+        if y_step or m_step:
+            m_y_step, cur_month = divmod(now.month + m_step, 12)
+            now = now.replace(year=now.year + y_step + m_y_step,
+                              month=cur_month or 12)
+        now = now + d_step
+    return
 
 
 # Timezone support (brought in from tzutils)

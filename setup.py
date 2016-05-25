@@ -13,7 +13,7 @@ from setuptools import setup
 
 
 __author__ = 'Mahmoud Hashemi'
-__version__ = '15.0.3dev'
+__version__ = '16.3.2dev'
 __contact__ = 'mahmoudrhashemi@gmail.com'
 __url__ = 'https://github.com/mahmoud/boltons'
 __license__ = 'BSD'
@@ -32,9 +32,13 @@ setup(name='boltons',
       license=__license__,
       platforms='any',
       classifiers=[
+          'Topic :: Utilities',
           'Intended Audience :: Developers',
           'Topic :: Software Development :: Libraries',
+          'Development Status :: 5 - Production/Stable',
           'Programming Language :: Python :: 2.6',
           'Programming Language :: Python :: 2.7',
-          'Programming Language :: Python :: 3.4', ]
+          'Programming Language :: Python :: 3.4',
+          'Programming Language :: Python :: 3.5',
+          'Programming Language :: Python :: Implementation :: PyPy', ]
       )

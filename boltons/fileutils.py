@@ -8,6 +8,7 @@ from __future__ import print_function
 
 import os
 import re
+import sys
 import stat
 import errno
 import fnmatch
@@ -19,12 +20,13 @@ __all__ = ['mkdir_p', 'atomic_save', 'AtomicSaver', 'FilePerms',
 
 
 FULL_PERMS = 511  # 0777 that both Python 2 and 3 can digest
-USER_RW_ONLY_PERMS = 384  # 0600 that both Python 2 and 3 can digest
+RW_PERMS = 438
 _SINGLE_FULL_PERM = 7  # or 07 in Python 2
 try:
     basestring
 except NameError:
-    basestring = (str, bytes)  # Python 3 compat
+    unicode = str  # Python 3 compat
+    basestring = (str, bytes)
 
 
 def mkdir_p(path):
@@ -158,8 +160,10 @@ class FilePerms(object):
         Args:
             path (str): Filesystem path of the target file.
 
-        >>> from os.path import expanduser
-        >>> 'r' in FilePerms.from_path(expanduser('~')).user  # probably
+        Here's an example that holds true on most systems:
+
+        >>> import tempfile
+        >>> 'r' in FilePerms.from_path(tempfile.tempdir).user
         True
         """
         stat_res = os.stat(path)
@@ -225,12 +229,75 @@ def atomic_save(dest_path, **kwargs):
     return AtomicSaver(dest_path, **kwargs)
 
 
-def _atomic_rename(path, new_path, overwrite=False):
-    if overwrite:
-        os.rename(path, new_path)
-    else:
-        os.link(path, new_path)
-        os.unlink(path)
+def path_to_unicode(path):
+    if isinstance(path, unicode):
+        return path
+    encoding = sys.getfilesystemencoding() or sys.getdefaultencoding()
+    return path.decode(encoding)
+
+
+if os.name == 'nt':
+    import ctypes
+    from ctypes import c_wchar_p
+    from ctypes.wintypes import DWORD, LPVOID
+
+    _ReplaceFile = ctypes.windll.kernel32.ReplaceFile
+    _ReplaceFile.argtypes = [c_wchar_p, c_wchar_p, c_wchar_p,
+                             DWORD, LPVOID, LPVOID]
+
+    def replace(src, dst):
+        # argument names match stdlib docs, docstring below
+        try:
+            # ReplaceFile fails if the dest file does not exist, so
+            # first try to rename it into position
+            os.rename(src, dst)
+            return
+        except WindowsError as we:
+            if we.errno == errno.EEXIST:
+                pass  # continue with the ReplaceFile logic below
+            else:
+                raise
+
+        src = path_to_unicode(src)
+        dst = path_to_unicode(dst)
+        res = _ReplaceFile(c_wchar_p(dst), c_wchar_p(src),
+                           None, 0, None, None)
+        if not res:
+            raise OSError('failed to replace %r with %r' % (dst, src))
+        return
+
+    def atomic_rename(src, dst, overwrite=False):
+        "Rename *src* to *dst*, replacing *dst* if *overwrite is True"
+        if overwrite:
+            replace(src, dst)
+        else:
+            os.rename(src, dst)
+        return
+else:
+    # wrapper func for cross compat + docs
+    def replace(src, dst):
+        # os.replace does the same thing on unix
+        return os.rename(src, dst)
+
+    def atomic_rename(src, dst, overwrite=False):
+        "Rename *src* to *dst*, replacing *dst* if *overwrite is True"
+        if overwrite:
+            os.rename(src, dst)
+        else:
+            os.link(src, dst)
+            os.unlink(dst)
+        return
+
+
+_atomic_rename = atomic_rename  # backwards compat
+
+replace.__doc__ = """Similar to :func:`os.replace` in Python 3.3+,
+this function will atomically create or replace the file at path
+*dst* with the file at path *src*.
+
+On Windows, this function uses the ReplaceFile API for maximum
+possible atomicity on a range of filesystems.
+"""
 
 
 class AtomicSaver(object):
@@ -246,24 +313,28 @@ class AtomicSaver(object):
             written.
         overwrite (bool): Whether to overwrite the destination file if
             it exists at completion time. Defaults to ``True``.
+        file_perms (int): Integer representation of file permissions
+            for the newly-created file. Defaults are, when the
+            destination path already exists, to copy the permissions
+            from the previous file, or if the file did not exist, to
+            respect the user's configured `umask`_, usually resulting
+            in octal 0644 or 0664.
         part_file (str): Name of the temporary *part_file*. Defaults
             to *dest_path* + ``.part``. Note that this argument is
             just the filename, and not the full path of the part
-            file. Part files are always created in the same directory
-            as the destination path. Otherwise, saving may not be atomic.
-        rm_part_on_exc (bool): Remove *part_file* on exception cases.
-            Defaults to ``True``, but ``False`` can be useful for
-            recovery in some cases. Note that resumption is not
-            automatic and by default an :exc:`OSError` is raised if
-            the *part_file* exists.
+            file. To guarantee atomic saves, part files are always
+            created in the same directory as the destination path.
         overwrite_part (bool): Whether to overwrite the *part_file*,
             should it exist at setup time. Defaults to ``False``,
             which results in an :exc:`OSError` being raised on
             pre-existing part files. Be careful of setting this to
             ``True`` in situations when multiple threads or processes
             could be writing to the same part file.
-        part_perms (int): Integer representation of file permissions
-            of the short-lived part file.
+        rm_part_on_exc (bool): Remove *part_file* on exception cases.
+            Defaults to ``True``, but ``False`` can be useful for
+            recovery in some cases. Note that resumption is not
+            automatic and by default an :exc:`OSError` is raised if
+            the *part_file* exists.
 
     Practically, the AtomicSaver serves a few purposes:
 
@@ -274,15 +345,18 @@ class AtomicSaver(object):
       * Optional recovery of partial data in failure cases.
 
     .. _context manager: https://docs.python.org/2/reference/compound_stmts.html#with
+    .. _umask: https://en.wikipedia.org/wiki/Umask
 
     """
+    _default_file_perms = RW_PERMS
+
     # TODO: option to abort if target file modify date has changed since start?
     def __init__(self, dest_path, **kwargs):
         self.dest_path = dest_path
         self.overwrite = kwargs.pop('overwrite', True)
+        self.file_perms = kwargs.pop('file_perms', None)
         self.overwrite_part = kwargs.pop('overwrite_part', False)
         self.part_filename = kwargs.pop('part_file', None)
-        self.part_file_perms = kwargs.pop('part_perms', USER_RW_ONLY_PERMS)
         self.rm_part_on_exc = kwargs.pop('rm_part_on_exc', True)
         self.text_mode = kwargs.pop('text_mode', False)  # for windows
         self.buffering = kwargs.pop('buffering', -1)
@@ -301,9 +375,31 @@ class AtomicSaver(object):
         self.part_file = None
 
     def _open_part_file(self):
-        fd = os.open(self.part_path, self.open_flags, self.part_file_perms)
+        do_chmod = True
+        file_perms = self.file_perms
+        if file_perms is None:
+            try:
+                # try to copy from file being replaced
+                stat_res = os.stat(self.dest_path)
+                file_perms = stat.S_IMODE(stat_res.st_mode)
+            except (OSError, IOError):
+                # default if no destination file exists
+                file_perms = self._default_file_perms
+                do_chmod = False  # respect the umask
+
+        fd = os.open(self.part_path, self.open_flags, file_perms)
         set_cloexec(fd)
         self.part_file = os.fdopen(fd, self.mode, self.buffering)
+
+        # if default perms are overridden by the user or previous dest_path
+        # chmod away the effects of the umask
+        if do_chmod:
+            try:
+                os.chmod(self.part_path, file_perms)
+            except (OSError, IOError):
+                self.part_file.close()
+                raise
+        return
 
     def setup(self):
         """Called on context manager entry (the :keyword:`with` statement),
@@ -327,6 +423,7 @@ class AtomicSaver(object):
         if self.overwrite_part and os.path.lexists(self.part_path):
             os.unlink(self.part_path)
         self._open_part_file()
+        return
 
     def __enter__(self):
         self.setup()
@@ -338,15 +435,18 @@ class AtomicSaver(object):
             if self.rm_part_on_exc:
                 try:
                     os.unlink(self.part_path)
-                except:
-                    pass
+                except Exception:
+                    pass  # avoid masking original error
             return
         try:
-            _atomic_rename(self.part_path, self.dest_path,
-                           overwrite=self.overwrite)
+            atomic_rename(self.part_path, self.dest_path,
+                          overwrite=self.overwrite)
         except OSError:
             if self.rm_part_on_exc:
-                os.unlink(self.part_path)
+                try:
+                    os.unlink(self.part_path)
+                except Exception:
+                    pass  # avoid masking original error
             raise  # could not save destination file
         return
 
@@ -370,7 +470,7 @@ def iter_find_files(directory, patterns, ignored=None):
     For example, finding Python files in the current directory:
 
     >>> filenames = sorted(iter_find_files(_CUR_DIR, '*.py'))
-    >>> filenames[-1].split('/')[-1]
+    >>> os.path.basename(filenames[-1])
     'typeutils.py'
 
     Or, Python files while ignoring emacs lockfiles:
@@ -460,8 +560,93 @@ def copy_tree(src, dst, symlinks=False, ignore=None):
 copytree = copy_tree  # alias for drop-in replacement of shutil
 
 
+try:
+    file
+except NameError:
+    file = object
+
+
+# like open(os.devnull) but with even fewer side effects
+class DummyFile(file):
+    # TODO: raise ValueErrors on closed for all methods?
+    # TODO: enforce read/write
+    def __init__(self, path, mode='r', buffering=None):
+        self.name = path
+        self.mode = mode
+        self.closed = False
+        self.errors = None
+        self.isatty = False
+        self.encoding = None
+        self.newlines = None
+        self.softspace = 0
+
+    def close(self):
+        self.closed = True
+
+    def fileno(self):
+        return -1
+
+    def flush(self):
+        if self.closed:
+            raise ValueError('I/O operation on a closed file')
+        return
+
+    def next(self):
+        raise StopIteration()
+
+    def read(self, size=0):
+        if self.closed:
+            raise ValueError('I/O operation on a closed file')
+        return ''
+
+    def readline(self, size=0):
+        if self.closed:
+            raise ValueError('I/O operation on a closed file')
+        return ''
+
+    def readlines(self, size=0):
+        if self.closed:
+            raise ValueError('I/O operation on a closed file')
+        return []
+
+    def seek(self):
+        if self.closed:
+            raise ValueError('I/O operation on a closed file')
+        return
+
+    def tell(self):
+        if self.closed:
+            raise ValueError('I/O operation on a closed file')
+        return 0
+
+    def truncate(self):
+        if self.closed:
+            raise ValueError('I/O operation on a closed file')
+        return
+
+    def write(self, string):
+        if self.closed:
+            raise ValueError('I/O operation on a closed file')
+        return
+
+    def writelines(self, list_of_strings):
+        if self.closed:
+            raise ValueError('I/O operation on a closed file')
+        return
+
+    def __next__(self):
+        raise StopIteration()
+
+    def __enter__(self):
+        if self.closed:
+            raise ValueError('I/O operation on a closed file')
+        return
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return
+
+
 if __name__ == '__main__':
     with atomic_save('/tmp/final.txt') as f:
         f.write('rofl')
-        raise ValueError('nope')
         f.write('\n')

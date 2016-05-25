@@ -8,6 +8,8 @@ provided by ``strutils``.
 from __future__ import print_function
 
 import re
+import sys
+import uuid
 import zlib
 import string
 import unicodedata
@@ -18,7 +20,7 @@ try:
     from HTMLParser import HTMLParser
     import htmlentitydefs
 except NameError:  # basestring not defined in Python 3
-    unicode, str, bytes, basestring = str, bytes, bytes, str
+    unicode, str, bytes, basestring = str, bytes, bytes, (str, bytes)
     unichr = chr
     from html.parser import HTMLParser
     from html import entities as htmlentitydefs
@@ -26,8 +28,10 @@ except NameError:  # basestring not defined in Python 3
 
 __all__ = ['camel2under', 'under2camel', 'slugify', 'split_punct_ws',
            'unit_len', 'ordinalize', 'cardinalize', 'pluralize', 'singularize',
-           'asciify', 'html2text', 'strip_ansi', 'bytes2human', 'find_hashtags',
-           'a10n', 'gunzip_bytes']  # 'StringBuffer']
+           'asciify', 'is_ascii', 'is_uuid', 'html2text', 'strip_ansi',
+           'bytes2human', 'find_hashtags', 'a10n', 'gunzip_bytes',
+           'iter_splitlines', 'indent', 'escape_shell_args',
+           'args2cmd', 'args2sh', 'parse_int_list', 'format_int_list']
 
 
 _punct_ws_str = string.punctuation + string.whitespace
@@ -67,10 +71,6 @@ def slugify(text, delim='_', lower=True, ascii=False):
 
     >>> slugify('First post! Hi!!!!~1    ')
     'first_post_hi_1'
-
-    # TODO: repr under Py3k
-    # >>> slugify("Kurt Gödel's pretty cool.", ascii=True)
-    # 'kurt_goedel_s_pretty_cool'
 
     >>> slugify("Kurt Gödel's pretty cool.", ascii=True) == \
         b'kurt_goedel_s_pretty_cool'
@@ -240,26 +240,41 @@ def _match_case(master, disciple):
 
 
 # Singular to plural map of irregular pluralizations
-_IRR_S2P = {'alumnus': 'alumni', 'analysis': 'analyses', 'antenna': 'antennae',
-            'appendix': 'appendices', 'axis': 'axes', 'bacterium': 'bacteria',
-            'basis': 'bases', 'beau': 'beaux', 'bureau': 'bureaus',
-            'cactus': 'cacti', 'child': 'children', 'corpus': 'corpora',
-            'crisis': 'crises', 'criterion': 'criteria',
+_IRR_S2P = {'addendum': 'addenda', 'alga': 'algae', 'alumna': 'alumnae',
+            'alumnus': 'alumni', 'analysis': 'analyses', 'antenna': 'antennae',
+            'appendix': 'appendices', 'axis': 'axes', 'bacillus': 'bacilli',
+            'bacterium': 'bacteria', 'basis': 'bases', 'beau': 'beaux',
+            'bison': 'bison', 'bureau': 'bureaus', 'cactus': 'cacti',
+            'calf': 'calves', 'child': 'children', 'corps': 'corps',
+            'corpus': 'corpora', 'crisis': 'crises', 'criterion': 'criteria',
             'curriculum': 'curricula', 'datum': 'data', 'deer': 'deer',
-            'diagnosis': 'diagnoses', 'ellipsis': 'ellipses', 'fish': 'fish',
-            'focus': 'foci', 'foot': 'feet', 'formula': 'formulae',
+            'diagnosis': 'diagnoses', 'die': 'dice', 'dwarf': 'dwarves',
+            'echo': 'echoes', 'elf': 'elves', 'ellipsis': 'ellipses',
+            'embargo': 'embargoes', 'emphasis': 'emphases', 'erratum': 'errata',
+            'fireman': 'firemen', 'fish': 'fish', 'focus': 'foci',
+            'foot': 'feet', 'formula': 'formulae', 'formula': 'formulas',
             'fungus': 'fungi', 'genus': 'genera', 'goose': 'geese',
-            'hypothesis': 'hypotheses', 'index': 'indices', 'louse': 'lice',
-            'man': 'men', 'matrix': 'matrices', 'means': 'means',
-            'medium': 'media', 'memorandum': 'memoranda', 'mouse': 'mice',
-            'nebula': 'nebulae', 'nucleus': 'nuclei', 'oasis': 'oases',
-            'offspring': 'offspring', 'ox': 'oxen', 'paralysis': 'paralyses',
-            'parenthesis': 'parentheses', 'phenomenon': 'phenomena',
-            'radius': 'radii', 'series': 'series', 'sheep': 'sheep',
-            'species': 'species', 'stimulus': 'stimuli', 'stratum': 'strata',
-            'synopsis': 'synopses', 'synthesis': 'syntheses',
-            'tableau': 'tableaux', 'thesis': 'theses', 'tooth': 'teeth',
-            'vertebra': 'vertebrae', 'vita': 'vitae', 'woman': 'women'}
+            'half': 'halves', 'hero': 'heroes', 'hippopotamus': 'hippopotami',
+            'hoof': 'hooves', 'hypothesis': 'hypotheses', 'index': 'indices',
+            'knife': 'knives', 'leaf': 'leaves', 'life': 'lives',
+            'loaf': 'loaves', 'louse': 'lice', 'man': 'men',
+            'matrix': 'matrices', 'means': 'means', 'medium': 'media',
+            'memorandum': 'memoranda', 'millennium': 'milennia', 'moose': 'moose',
+            'mosquito': 'mosquitoes', 'mouse': 'mice', 'nebula': 'nebulae',
+            'neurosis': 'neuroses', 'nucleus': 'nuclei', 'oasis': 'oases',
+            'octopus': 'octopi', 'offspring': 'offspring', 'ovum': 'ova',
+            'ox': 'oxen', 'paralysis': 'paralyses', 'parenthesis': 'parentheses',
+            'person': 'people', 'phenomenon': 'phenomena', 'potato': 'potatoes',
+            'radius': 'radii', 'scarf': 'scarves', 'scissors': 'scissors',
+            'self': 'selves', 'series': 'series', 'sheep': 'sheep',
+            'shelf': 'shelves', 'species': 'species', 'stimulus': 'stimuli',
+            'stratum': 'strata', 'syllabus': 'syllabi', 'symposium': 'symposia',
+            'synopsis': 'synopses', 'synthesis': 'syntheses', 'tableau': 'tableaux',
+            'that': 'those', 'thesis': 'theses', 'thief': 'thieves',
+            'this': 'these', 'tomato': 'tomatoes', 'tooth': 'teeth',
+            'torpedo': 'torpedoes', 'vertebra': 'vertebrae', 'veto': 'vetoes',
+            'vita': 'vitae', 'watch': 'watches', 'wife': 'wives',
+            'wolf': 'wolves', 'woman': 'women'}
 
 
 # Reverse index of the above
@@ -389,15 +404,9 @@ def asciify(text, ignore=False):
         ignore (bool): Configures final encoding to ignore remaining
             unasciified unicode instead of replacing it.
 
-    # TODO: repr under Py3k
-    # >>> asciify('Beyoncé')
-    # 'Beyonce'
-
     >>> asciify('Beyoncé') == b'Beyonce'
     True
-
     """
-    # TODO: Python 3 compliance.
     try:
         try:
             return text.encode('ascii')
@@ -412,6 +421,33 @@ def asciify(text, ignore=False):
         transd = unicodedata.normalize('NFKD', text.translate(DEACCENT_MAP))
         ret = transd.encode('ascii', mode)
         return ret
+
+
+def is_ascii(text):
+    """Check if a unicode or bytestring, *text*, is composed of ascii
+    characters only. Raises :exc:`ValueError` if argument is not text.
+
+    Args:
+        text (str or unicode): The string to be checked.
+
+    >>> is_ascii('Beyoncé')
+    False
+    >>> is_ascii('Beyonce')
+    True
+    """
+    if isinstance(text, unicode):
+        try:
+            text.encode('ascii')
+        except UnicodeEncodeError:
+            return False
+    elif isinstance(text, bytes):
+        try:
+            text.decode('ascii')
+        except UnicodeDecodeError:
+            return False
+    else:
+        raise ValueError('expected text or bytes, not %r' % type(text))
+    return True
 
 
 class DeaccenterDict(dict):
@@ -627,3 +663,312 @@ def iter_splitlines(text):
     if tail:
         yield tail
     return
+
+
+def indent(text, margin, newline='\n', key=bool):
+    """The missing counterpart to the built-in :func:`textwrap.dedent`.
+
+    Args:
+        text (str): The text to indent.
+        margin (str): The string to prepend to each line.
+        newline (str): The newline used to rejoin the lines (default: ``\\n``)
+        key (callable): Called on each line to determine whether to
+          indent it. Default: :class:`bool`, to ensure that empty lines do
+          not get whitespace added.
+    """
+    indented_lines = [(margin + line if key(line) else line)
+                      for line in iter_splitlines(text)]
+    return newline.join(indented_lines)
+
+
+def is_uuid(obj, version=4):
+    """Check the argument is either a valid UUID object or string.
+
+    Args:
+        obj (object): The test target. Strings and UUID objects supported.
+        version (int): The target UUID version, set to 0 to skip version check.
+
+    >>> is_uuid('e682ccca-5a4c-4ef2-9711-73f9ad1e15ea')
+    True
+    >>> is_uuid('0221f0d9-d4b9-11e5-a478-10ddb1c2feb9')
+    False
+    >>> is_uuid('0221f0d9-d4b9-11e5-a478-10ddb1c2feb9', version=1)
+    True
+    """
+    if not isinstance(obj, uuid.UUID):
+        try:
+            obj = uuid.UUID(obj)
+        except (TypeError, ValueError, AttributeError):
+            return False
+    if version and obj.version != int(version):
+        return False
+    return True
+
+
+def escape_shell_args(args, sep=' ', style=None):
+    """Returns an escaped version of each string in *args*, according to
+    *style*.
+
+    Args:
+        args (list): A list of arguments to escape and join together
+        sep (str): The separator used to join the escaped arguments.
+        style (str): The style of escaping to use. Can be one of
+          ``cmd`` or ``sh``, geared toward Windows and Linux/BSD/etc.,
+          respectively. If *style* is ``None``, then it is picked
+          according to the system platform.
+
+    See :func:`args2cmd` and :func:`args2sh` for details and example
+    output for each style.
+    """
+    if not style:
+        style = 'cmd' if sys.platform == 'win32' else 'sh'
+
+    if style == 'sh':
+        return args2sh(args, sep=sep)
+    elif style == 'cmd':
+        return args2cmd(args, sep=sep)
+
+    raise ValueError("style expected one of 'cmd' or 'sh', not %r" % style)
+
+
+_find_sh_unsafe = re.compile(r'[^a-zA-Z0-9_@%+=:,./-]').search
+
+
+def args2sh(args, sep=' '):
+    """Return a shell-escaped string version of *args*, separated by
+    *sep*, based on the rules of sh, bash, and other shells in the
+    Linux/BSD/MacOS ecosystem.
+
+    >>> print(args2sh(['aa', '[bb]', "cc'cc", 'dd"dd']))
+    aa '[bb]' 'cc'"'"'cc' 'dd"dd'
+
+    As you can see, arguments with no special characters are not
+    escaped, arguments with special characters are quoted with single
+    quotes, and single quotes themselves are quoted with double
+    quotes. Double quotes are handled like any other special
+    character.
+
+    Based on code from the :mod:`pipes`/:mod:`shlex` modules. Also
+    note that :mod:`shlex` and :mod:`argparse` have functions to split
+    and parse strings escaped in this manner.
+    """
+    ret_list = []
+
+    for arg in args:
+        if not arg:
+            ret_list.append("''")
+            continue
+        if _find_sh_unsafe(arg) is None:
+            ret_list.append(arg)
+            continue
+        # use single quotes, and put single quotes into double quotes
+        # the string $'b is then quoted as '$'"'"'b'
+        ret_list.append("'" + arg.replace("'", "'\"'\"'") + "'")
+
+    return ' '.join(ret_list)
+
+
+def args2cmd(args, sep=' '):
+    r"""Return a shell-escaped string version of *args*, separated by
+    *sep*, using the same rules as the Microsoft C runtime.
+
+    >>> print(args2cmd(['aa', '[bb]', "cc'cc", 'dd"dd']))
+    aa [bb] cc'cc dd\"dd
+
+    As you can see, escaping is through backslashing and not quoting,
+    and double quotes are the only special character. See the comment
+    in the code for more details. Based on internal code from the
+    :mod:`subprocess` module.
+
+    """
+    # technique description from subprocess below
+    """
+    1) Arguments are delimited by white space, which is either a
+       space or a tab.
+
+    2) A string surrounded by double quotation marks is
+       interpreted as a single argument, regardless of white space
+       contained within.  A quoted string can be embedded in an
+       argument.
+
+    3) A double quotation mark preceded by a backslash is
+       interpreted as a literal double quotation mark.
+
+    4) Backslashes are interpreted literally, unless they
+       immediately precede a double quotation mark.
+
+    5) If backslashes immediately precede a double quotation mark,
+       every pair of backslashes is interpreted as a literal
+       backslash.  If the number of backslashes is odd, the last
+       backslash escapes the next double quotation mark as
+       described in rule 3.
+
+    See http://msdn.microsoft.com/en-us/library/17w5ykft.aspx
+    or search http://msdn.microsoft.com for
+    "Parsing C++ Command-Line Arguments"
+    """
+    result = []
+    needquote = False
+    for arg in args:
+        bs_buf = []
+
+        # Add a space to separate this argument from the others
+        if result:
+            result.append(' ')
+
+        needquote = (" " in arg) or ("\t" in arg) or not arg
+        if needquote:
+            result.append('"')
+
+        for c in arg:
+            if c == '\\':
+                # Don't know if we need to double yet.
+                bs_buf.append(c)
+            elif c == '"':
+                # Double backslashes.
+                result.append('\\' * len(bs_buf)*2)
+                bs_buf = []
+                result.append('\\"')
+            else:
+                # Normal char
+                if bs_buf:
+                    result.extend(bs_buf)
+                    bs_buf = []
+                result.append(c)
+
+        # Add remaining backslashes, if any.
+        if bs_buf:
+            result.extend(bs_buf)
+
+        if needquote:
+            result.extend(bs_buf)
+            result.append('"')
+
+    return ''.join(result)
+
+
+def parse_int_list(range_string, delim=',', range_delim='-'):
+    """Returns a sorted list of positive integers based on
+    *range_string*. Reverse of :func:`format_int_list`.
+
+    Args:
+        range_string (str): String of comma separated positive
+            integers or ranges (e.g. '1,2,4-6,8'). Typical of a custom
+            page range string used in printer dialogs.
+        delim (char): Defaults to ','. Separates integers and
+            contiguous ranges of integers.
+        range_delim (char): Defaults to '-'. Indicates a contiguous
+            range of integers.
+
+    >>> parse_int_list('1,3,5-8,10-11,15')
+    [1, 3, 5, 6, 7, 8, 10, 11, 15]
+
+    """
+    output = []
+
+    for x in range_string.strip().split(delim):
+
+        # Range
+        if range_delim in x:
+            range_limits = list(map(int, x.split(range_delim)))
+            output += list(range(min(range_limits), max(range_limits)+1))
+
+        # Empty String
+        elif not x:
+            continue
+
+        # Integer
+        else:
+            output.append(int(x))
+
+    return sorted(output)
+
+
+def format_int_list(int_list, delim=',', range_delim='-', delim_space=False):
+    """Returns a sorted range string from a list of positive integers
+    (*int_list*). Contiguous ranges of integers are collapsed to min
+    and max values. Reverse of :func:`parse_int_list`.
+
+    Args:
+        int_list (list): List of positive integers to be converted
+           into a range string (e.g. [1,2,4,5,6,8]).
+        delim (char): Defaults to ','. Separates integers and
+           contiguous ranges of integers.
+        range_delim (char): Defaults to '-'. Indicates a contiguous
+           range of integers.
+        delim_space (bool): Defaults to ``False``. If ``True``, adds a
+           space after all *delim* characters.
+
+    >>> format_int_list([1,3,5,6,7,8,10,11,15])
+    '1,3,5-8,10-11,15'
+
+    """
+    output = []
+    contig_range = collections.deque()
+
+    for x in sorted(int_list):
+
+        # Handle current (and first) value.
+        if len(contig_range) < 1:
+            contig_range.append(x)
+
+        # Handle current value, given multiple previous values are contiguous.
+        elif len(contig_range) > 1:
+            delta = x - contig_range[-1]
+
+            # Current value is contiguous.
+            if delta == 1:
+                contig_range.append(x)
+
+            # Current value is non-contiguous.
+            elif delta > 1:
+                range_substr = '{0:d}{1}{2:d}'.format(min(contig_range),
+                                                      range_delim,
+                                                      max(contig_range))
+                output.append(range_substr)
+                contig_range.clear()
+                contig_range.append(x)
+
+            # Current value repeated.
+            else:
+                continue
+
+        # Handle current value, given no previous contiguous integers
+        else:
+            delta = x - contig_range[0]
+
+            # Current value is contiguous.
+            if delta == 1:
+                contig_range.append(x)
+
+            # Current value is non-contiguous.
+            elif delta > 1:
+                output.append('{0:d}'.format(contig_range.popleft()))
+                contig_range.append(x)
+
+            # Current value repeated.
+            else:
+                continue
+
+    # Handle the last value.
+    else:
+
+        # Last value is non-contiguous.
+        if len(contig_range) == 1:
+            output.append('{0:d}'.format(contig_range.popleft()))
+            contig_range.clear()
+
+        # Last value is part of contiguous range.
+        elif len(contig_range) > 1:
+            range_substr = '{0:d}{1}{2:d}'.format(min(contig_range),
+                                                  range_delim,
+                                                  max(contig_range))
+            output.append(range_substr)
+            contig_range.clear()
+
+    if delim_space:
+        output_str = (delim+' ').join(output)
+    else:
+        output_str = delim.join(output)
+
+    return output_str

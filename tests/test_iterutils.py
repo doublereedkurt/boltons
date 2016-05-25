@@ -1,8 +1,13 @@
 
 import pytest
 
-from boltons.iterutils import first, remap, default_enter, default_exit
 from boltons.dictutils import OMD
+from boltons.iterutils import (first,
+                               remap,
+                               default_enter,
+                               default_exit,
+                               get_path)
+from boltons.namedutils import namedtuple
 
 
 isbool = lambda x: isinstance(x, bool)
@@ -49,8 +54,6 @@ class TestFirst(object):
 
 
 class TestRemap(object):
-    # TODO: test enter return (prepopulated_collection, False)
-    # TODO: test which counts the number of visit calls
     # TODO: test namedtuples and other immutable containers
 
     def test_basic_clone(self):
@@ -72,14 +75,14 @@ class TestRemap(object):
 
     def test_basic_upper(self):
         orig = {'a': 1, 'b': object(), 'c': {'d': set()}}
-        remapped = remap(orig, lambda k, v: (k.upper(), v))
+        remapped = remap(orig, lambda p, k, v: (k.upper(), v))
         assert orig['a'] == remapped['A']
         assert orig['b'] == remapped['B']
         assert orig['c']['d'] == remapped['C']['D']
 
     def test_item_drop(self):
         orig = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        even_items = remap(orig, lambda k, v: not (v % 2))
+        even_items = remap(orig, lambda p, k, v: not (v % 2))
         assert even_items == [0, 2, 4, 6, 8]
 
     def test_noncallables(self):
@@ -117,9 +120,77 @@ class TestRemap(object):
         assert remapped[0] is remapped[1]
         assert remapped[0] is not duperef[0]
 
+    def test_namedtuple(self):
+        """TODO: this fails right now because namedtuples' __new__ is
+        overridden to accept arguments. remap's default_enter tries
+        to create an empty namedtuple and gets a TypeError.
+
+        Could make it so that immutable types actually don't create a
+        blank new parent and instead use the old_parent as a
+        placeholder, creating a new one at exit-time from the value's
+        __class__ (how default_exit works now). But even then it would
+        have to *args in the values, as namedtuple constructors don't
+        take an iterable.
+        """
+
+        Point = namedtuple('Point', 'x y')
+        point_map = {'origin': [Point(0, 0)]}
+
+        with pytest.raises(TypeError):
+            remapped = remap(point_map)
+            assert isinstance(remapped['origin'][0], Point)
+
+    def test_path(self):
+        path_map = {}
+
+        # test visit's path
+        target_str = 'test'
+        orig = [[[target_str]]]
+        ref_path = (0, 0, 0)
+
+        def visit(path, key, value):
+            if value is target_str:
+                path_map['target_str'] = path + (key,)
+            return key, value
+
+        remapped = remap(orig, visit=visit)
+
+        assert remapped == orig
+        assert path_map['target_str'] == ref_path
+
+        # test enter's path
+        target_obj = object()
+        orig = {'a': {'b': {'c': {'d': ['e', target_obj, 'f']}}}}
+        ref_path = ('a', 'b', 'c', 'd', 1)
+
+        def enter(path, key, value):
+            if value is target_obj:
+                path_map['target_obj'] = path + (key,)
+            return default_enter(path, key, value)
+
+        remapped = remap(orig, enter=enter)
+
+        assert remapped == orig
+        assert path_map['target_obj'] == ref_path
+
+        # test exit's path
+        target_set = frozenset([1, 7, 3, 8])
+        orig = [0, 1, 2, [3, 4, [5, target_set]]]
+        ref_path = (3, 2, 1)
+
+        def exit(path, key, old_parent, new_parent, new_items):
+            if old_parent is target_set:
+                path_map['target_set'] = path + (key,)
+            return default_exit(path, key, old_parent, new_parent, new_items)
+
+        remapped = remap(orig, exit=exit)
+
+        assert remapped == orig
+        assert path_map['target_set'] == ref_path
+
     def test_reraise_visit(self):
         root = {'A': 'b', 1: 2}
-        key_to_lower = lambda k, v: (k.lower(), v)
+        key_to_lower = lambda p, k, v: (k.lower(), v)
         with pytest.raises(AttributeError):
             remap(root, key_to_lower)
 
@@ -130,7 +201,7 @@ class TestRemap(object):
     def test_drop_nones(self):
         orig = {'a': 1, 'b': None, 'c': [3, None, 4, None]}
         ref = {'a': 1, 'c': [3, 4]}
-        drop_none = lambda k, v: v is not None
+        drop_none = lambda p, k, v: v is not None
         remapped = remap(orig, visit=drop_none)
         assert remapped == ref
 
@@ -139,10 +210,10 @@ class TestRemap(object):
         assert not remapped
 
     def test_dict_to_omd(self):
-        def enter(key, value):
+        def enter(path, key, value):
             if isinstance(value, dict):
                 return OMD(), sorted(value.items())
-            return default_enter(key, value)
+            return default_enter(path, key, value)
 
         orig = [{'title': 'Wild Palms',
                  'ratings': {1: 1, 2: 3, 3: 5, 4: 6, 5: 3}},
@@ -157,12 +228,14 @@ class TestRemap(object):
         assert isinstance(remapped[1]['ratings'], OMD)
 
     def test_sort_all_lists(self):
-        def exit(new_items, new_parent, old_parent):
-            ret = default_exit(new_items, new_parent, old_parent)
+        def exit(path, key, old_parent, new_parent, new_items):
+            # NB: in this case, I'd normally use *a, **kw
+            ret = default_exit(path, key, old_parent, new_parent, new_items)
             if isinstance(ret, list):
                 ret.sort()
             return ret
 
+        # NB: Airplane model numbers (Boeing and Airbus)
         orig = [[[7, 0, 7],
                  [7, 2, 7],
                  [7, 7, 7],
@@ -186,12 +259,12 @@ class TestRemap(object):
     def test_collector_pattern(self):
         all_interests = set()
 
-        def enter(key, value):
+        def enter(path, key, value):
             try:
                 all_interests.update(value['interests'])
             except:
                 pass
-            return default_enter(key, value)
+            return default_enter(path, key, value)
 
         orig = [{'name': 'Kate',
                  'interests': ['theater', 'manga'],
@@ -207,3 +280,139 @@ class TestRemap(object):
 
         remap(orig, enter=enter)
         assert all_interests == ref
+
+    def test_add_length(self):
+        def exit(path, key, old_parent, new_parent, new_items):
+            ret = default_exit(path, key, old_parent, new_parent, new_items)
+            try:
+                ret['review_length'] = len(ret['review'])
+            except:
+                pass
+            return ret
+
+        orig = {'Star Trek':
+                {'TNG': {'stars': 10,
+                         'review': "Episodic AND deep. <3 Data."},
+                 'DS9': {'stars': 8.5,
+                         'review': "Like TNG, but with a story and no Data."},
+                 'ENT': {'stars': None,
+                         'review': "Can't review what you can't watch."}},
+                'Babylon 5': {'stars': 6,
+                              'review': "Sophomoric, like a bitter laugh."},
+                'Dr. Who': {'stars': None,
+                            'review': "800 episodes is too many to review."}}
+        remapped = remap(orig, exit=exit)
+        assert (remapped['Star Trek']['TNG']['review_length']
+                < remapped['Star Trek']['DS9']['review_length'])
+
+    def test_prepop(self):
+        """Demonstrating normalization and ID addition through prepopulating
+        the objects wth an enter callback.
+        """
+        base_obj = {'name': None,
+                    'rank': None,
+                    'id': 1}
+
+        def enter(path, key, value):
+            new_parent, new_items = default_enter(path, key, value)
+            try:
+                new_parent.update(base_obj)
+                base_obj['id'] += 1
+            except:
+                pass
+            return new_parent, new_items
+
+        orig = [{'name': 'Firefox', 'rank': 1},
+                {'name': 'Chrome', 'rank': 2},
+                {'name': 'IE'}]
+        ref = [{'name': 'Firefox', 'rank': 1, 'id': 1},
+               {'name': 'Chrome', 'rank': 2, 'id': 2},
+               {'name': 'IE', 'rank': None, 'id': 3}]
+        remapped = remap(orig, enter=enter)
+        assert remapped == ref
+
+
+class TestGetPath(object):
+    def test_depth_one(self):
+        root = ['test']
+        assert get_path(root, (0,)) == 'test'
+        assert get_path(root, '0') == 'test'
+
+        root = {'key': 'value'}
+        assert get_path(root, ('key',)) == 'value'
+        assert get_path(root, 'key') == 'value'
+
+    def test_depth_two(self):
+        root = {'key': ['test']}
+        assert get_path(root, ('key', 0)) == 'test'
+        assert get_path(root, 'key.0') == 'test'
+
+
+def test_backoff_basic():
+    from boltons.iterutils import backoff
+
+    assert backoff(1, 16) == [1.0, 2.0, 4.0, 8.0, 16.0]
+    assert backoff(1, 1) == [1.0]
+    assert backoff(2, 15) == [2.0, 4.0, 8.0, 15.0]
+
+
+def test_backoff_repeat():
+    from boltons.iterutils import backoff_iter
+
+    fives = []
+    for val in backoff_iter(5, 5, count='repeat'):
+        fives.append(val)
+        if len(fives) >= 1000:
+            break
+    assert fives == [5] * 1000
+
+
+def test_backoff_zero_start():
+    from boltons.iterutils import backoff
+
+    assert backoff(0, 16) == [0.0, 1.0, 2.0, 4.0, 8.0, 16.0]
+    assert backoff(0, 15) == [0.0, 1.0, 2.0, 4.0, 8.0, 15.0]
+
+    slow_backoff = [round(x, 2) for x in backoff(0, 2.9, factor=1.2)]
+    assert slow_backoff == [0.0, 1.0, 1.2, 1.44, 1.73, 2.07, 2.49, 2.9]
+
+
+def test_backoff_validation():
+    from boltons.iterutils import backoff
+
+    with pytest.raises(ValueError):
+        backoff(8, 2)
+    with pytest.raises(ValueError):
+        backoff(1, 0)
+    with pytest.raises(ValueError):
+        backoff(-1, 10)
+    with pytest.raises(ValueError):
+        backoff(2, 8, factor=0)
+    with pytest.raises(ValueError):
+        backoff(2, 8, jitter=20)
+
+
+def test_backoff_jitter():
+    from boltons.iterutils import backoff
+
+    start, stop = 1, 256
+
+    unjittered = backoff(start, stop)
+    jittered = backoff(start, stop, jitter=True)
+
+    assert len(unjittered) == len(jittered)
+    assert [u >= j for u, j in zip(unjittered, jittered)]
+
+    neg_jittered = backoff(start, stop, jitter=-0.01)
+
+    assert len(unjittered) == len(neg_jittered)
+    assert [u <= j for u, j in zip(unjittered, neg_jittered)]
+
+    o_jittered = backoff(start, stop, jitter=-0.0)
+    assert len(unjittered) == len(o_jittered)
+    assert [u == j for u, j in zip(unjittered, o_jittered)]
+
+    nonconst_jittered = backoff(stop, stop, count=5, jitter=True)
+    assert len(nonconst_jittered) == 5
+    # no two should be equal realistically
+    assert len(set(nonconst_jittered)) == 5

@@ -15,7 +15,7 @@
 import os
 import sys
 import sphinx
-
+from pprint import pprint
 
 # If extensions (or modules to document with autodoc) are in another directory,
 # add these directories to sys.path here. If the directory is relative to the
@@ -25,6 +25,8 @@ PROJECT_PATH = os.path.abspath(CUR_PATH + '/../')
 PACKAGE_PATH = os.path.abspath(CUR_PATH + '/../boltons/')
 sys.path.insert(0, PROJECT_PATH)
 sys.path.insert(0, PACKAGE_PATH)
+
+pprint(os.environ)
 
 
 def get_mod_stats():
@@ -98,8 +100,8 @@ project = u'boltons'
 copyright = u'2015, Mahmoud Hashemi'
 author = u'Mahmoud Hashemi'
 
-version = '15.0'
-release = '15.0.0'
+version = '16.3'
+release = '16.3.1'
 
 if os.name != 'nt':
     today_fmt = '%B %e, %Y'
@@ -118,10 +120,14 @@ intersphinx_mapping = {'python': ('https://docs.python.org/2.7', None)}
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 on_rtd = os.environ.get('READTHEDOCS', None) == 'True'
-if not on_rtd: # only import and set the theme if we're building docs locally
+
+if on_rtd:
+    html_theme = 'default'
+else: # only import and set the theme if we're building docs locally
     import sphinx_rtd_theme
     html_theme = 'sphinx_rtd_theme'
-    html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
+    html_theme_path = ['_themes', sphinx_rtd_theme.get_html_theme_path()]
+
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
@@ -129,7 +135,14 @@ if not on_rtd: # only import and set the theme if we're building docs locally
 #html_theme_options = {}
 
 # Add any paths that contain custom themes here, relative to this directory.
-#html_theme_path = []
+# html_theme_path = []
+
+# TEMP: see https://github.com/rtfd/readthedocs.org/issues/1692
+# Add RTD Theme Path.
+#if 'html_theme_path' in globals():
+#    html_theme_path.append('/home/docs/checkouts/readthedocs.org/readthedocs/templates/sphinx')
+#else:
+#    html_theme_path = ['_themes', '/home/docs/checkouts/readthedocs.org/readthedocs/templates/sphinx']
 
 # The name for this set of Sphinx documents.  If None, it defaults to
 # "<project> v<release> documentation".

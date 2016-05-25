@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
-"""``statsutils`` provides statistical functionality, such as mean
-(average), median, and variance, for basic data analysis.
+"""``statsutils`` provides tools aimed primarily at descriptive
+statistics for data analysis, such as :func:`mean` (average),
+:func:`median`, :func:`variance`, and many others,
 
 The :class:`Stats` type provides all the main functionality of the
 ``statsutils`` module. A :class:`Stats` object wraps a given dataset,
 providing all statistical measures as property attributes. These
 attributes cache their results, which allows efficient computation of
 multiple measures, as many measures rely on other measures. For
-example, relative standard deviation (:meth:`Stats.rel_std_dev`) relies
-on both the mean and standard deviation.
+example, relative standard deviation (:attr:`Stats.rel_std_dev`)
+relies on both the mean and standard deviation. The Stats object
+caches those results so no rework is done.
 
-The :class:`Stats` type's methods have a module-level counterpart for
+The :class:`Stats` type's attributes have module-level counterparts for
 convenience when the computation reuse advantages do not apply.
 
 >>> stats = Stats(range(42))
@@ -18,6 +20,14 @@ convenience when the computation reuse advantages do not apply.
 20.5
 >>> mean(range(42))
 20.5
+
+Statistics is a large field, and ``statsutils`` is focused on a few
+basic techniques that are useful in software. The following is a brief
+introduction to those techniques. For a more in-depth introduction,
+`Statistics for Software
+<https://www.paypal-engineering.com/2016/04/11/statistics-for-software/>`_,
+an article I wrote on the topic. It introduces key terminology vital
+to effective usage of statistics.
 
 Statistical moments
 -------------------
@@ -37,12 +47,13 @@ The four `Standardized moments`_ are:
 
 For more information check out `the Moment article on Wikipedia`_.
 
-.. _moment: http://en.wikipedia.org/wiki/Moment_(mathematics)
-.. _Standardied moments: https://en.wikipedia.org/wiki/Standardized_moment
+.. _moment: https://en.wikipedia.org/wiki/Moment_(mathematics)
+.. _Standardized moments: https://en.wikipedia.org/wiki/Standardized_moment
 .. _Mean: https://en.wikipedia.org/wiki/Mean
 .. _Variance: https://en.wikipedia.org/wiki/Variance
 .. _Skewness: https://en.wikipedia.org/wiki/Skewness
 .. _Kurtosis: https://en.wikipedia.org/wiki/Kurtosis
+.. _the Moment article on Wikipedia: https://en.wikipedia.org/wiki/Moment_(mathematics)
 
 Keep in mind that while these moments can give a bit more insight into
 the shape and distribution of data, they do not guarantee a complete
@@ -68,6 +79,7 @@ dilemma. ``statsutils`` also includes several robust statistical methods:
 .. _Median Absolute Deviation: https://en.wikipedia.org/wiki/Median_absolute_deviation
 .. _Trimming: https://en.wikipedia.org/wiki/Trimmed_estimator
 
+
 Online and Offline Statistics
 -----------------------------
 
@@ -81,6 +93,7 @@ system instrumentation package.
 .. _Online: https://en.wikipedia.org/wiki/Online_algorithm
 .. _streaming: https://en.wikipedia.org/wiki/Streaming_algorithm
 .. _Lithoxyl: https://github.com/mahmoud/lithoxyl
+
 """
 
 from __future__ import print_function
@@ -114,9 +127,19 @@ class Stats(object):
     """The ``Stats`` type is used to represent a group of unordered
     statistical datapoints for calculations such as mean, median, and
     variance.
+
+    Args:
+
+        data (list): List or other iterable containing numeric values.
+        default (float): A value to be returned when a given
+            statistical measure is not defined. 0.0 by default, but
+            ``float('nan')`` is appropriate for stricter applications.
+        use_copy (bool): By default Stats objects copy the initial
+            data into a new list to avoid issues with
+            modifications. Pass ``False`` to disable this behavior.
+
     """
     def __init__(self, data, default=0.0, use_copy=True):
-        # float('nan') could also be a good default
         self._use_copy = use_copy
         self._is_sorted = False
         if use_copy:
@@ -154,7 +177,21 @@ class Stats(object):
 
     def clear_cache(self):
         for attr_name in self._prop_attr_names:
-            delattr(self, getattr(self.__class__, attr_name).internal_name)
+            attr_name = getattr(self.__class__, attr_name).internal_name
+            if not hasattr(self, attr_name):
+                continue
+            delattr(self, attr_name)
+
+    def _calc_count(self):
+        """The number of items in this Stats object. Returns the same as
+        :func:`len` on a Stats object, but provided for pandas terminology
+        parallelism.
+
+        >>> Stats(range(20)).count
+        20
+        """
+        return len(self.data)
+    count = _StatsProperty('count', _calc_count)
 
     def _calc_mean(self):
         """
@@ -168,6 +205,30 @@ class Stats(object):
         """
         return sum(self.data, 0.0) / len(self.data)
     mean = _StatsProperty('mean', _calc_mean)
+
+    def _calc_max(self):
+        """
+        The maximum value present in the data.
+
+        >>> Stats([2, 1, 3]).max
+        3
+        """
+        if self._is_sorted:
+            return self.data[-1]
+        return max(self.data)
+    max = _StatsProperty('max', _calc_max)
+
+    def _calc_min(self):
+        """
+        The minimum value present in the data.
+
+        >>> Stats([2, 1, 3]).min
+        1
+        """
+        if self._is_sorted:
+            return self.data[0]
+        return min(self.data)
+    min = _StatsProperty('min', _calc_min)
 
     def _calc_median(self):
         """
@@ -186,13 +247,17 @@ class Stats(object):
     median = _StatsProperty('median', _calc_median)
 
     def _calc_trimean(self):
-        """
+        """The trimean is a robust measure of central tendency, like the
+        median, that takes the weighted average of the median and the
+        upper and lower quartiles.
+
         >>> trimean([2, 1, 3])
         2.0
         >>> trimean(range(97))
         48.0
         >>> trimean(list(range(96)) + [1066])  # 1066 is an arbitrary outlier
         48.0
+
         """
         sorted_data = self._get_sorted_data()
         gq = lambda q: self._get_quantile(sorted_data, q)
@@ -344,7 +409,24 @@ class Stats(object):
         q = float(q)
         if not 0.0 <= q <= 1.0:
             raise ValueError('expected q between 0.0 and 1.0, not %r' % q)
+        elif not self.data:
+            return self.default
         return self._get_quantile(self._get_sorted_data(), q)
+
+    def get_zscore(self, value):
+        """Get the z-score for *value* in the group. If the standard deviation
+        is 0, 0 inf or -inf will be returned to indicate whether the value is
+        equal to, greater than or below the group's mean.
+        """
+        mean = self.mean
+        if self.std_dev == 0:
+            if value == mean:
+                return 0
+            if value > mean:
+                return float('inf')
+            if value < mean:
+                return float('-inf')
+        return (float(value) - mean) / self.std_dev
 
     def trim_relative(self, amount=0.15):
         """A utility function used to cut a proportion of values off each end
@@ -374,6 +456,89 @@ class Stats(object):
         m = self.mean
         return [(v - m) ** power for v in self.data]
 
+    def describe(self, quantiles=None, format=None):
+        """Provides standard summary statistics for the data in the Stats
+        object, in one of several convenient formats.
+
+        Args:
+            quantiles (list): A list of numeric values to use as
+                quantiles in the resulting summary. All values must be
+                0.0-1.0, with 0.5 representing the median. Defaults to
+                ``[0.25, 0.5, 0.75]``, representing the standard
+                quartiles.
+            format (str): Controls the return type of the function,
+                with one of three valid values: ``"dict"`` gives back
+                a :class:`dict` with the appropriate keys and
+                values. ``"list"`` is a list of key-value pairs in an
+                order suitable to pass to an OrderedDict or HTML
+                table. ``"text"`` converts the values to text suitable
+                for printing, as seen below.
+
+        Here is the information returned by a default ``describe``, as
+        presented in the ``"text"`` format:
+
+        >>> stats = Stats(range(1, 8))
+        >>> print(stats.describe(format='text'))
+        count:    7
+        mean:     4.0
+        std_dev:  2.0
+        min:      1
+        0.25:     2.5
+        0.5:      4
+        0.75:     5.5
+        max:      7
+
+        For more advanced descriptive statistics, check out my blog
+        post on the topic `Statistics for Software
+        <https://www.paypal-engineering.com/2016/04/11/statistics-for-software/>`_.
+
+        """
+        if format is None:
+            format = 'dict'
+        elif format not in ('dict', 'list', 'text'):
+            raise ValueError('invalid format for describe,'
+                             ' expected one of "dict"/"list"/"text", not %r'
+                             % format)
+        quantiles = quantiles or [0.25, 0.5, 0.75]
+        q_items = []
+        for q in quantiles:
+            q_val = self.get_quantile(q)
+            q_items.append((str(q), q_val))
+
+        items = [('count', self.count),
+                 ('mean', self.mean),
+                 ('std_dev', self.std_dev),
+                 ('min', self.min)]
+        items.extend(q_items)
+        items.append(('max', self.max))
+        if format == 'dict':
+            ret = dict(items)
+        elif format == 'list':
+            ret = items
+        elif format == 'text':
+            ret = '\n'.join(['%s%s' % ((label + ':').ljust(10), val)
+                             for label, val in items])
+        return ret
+
+
+def describe(data, quantiles=None, format=None):
+    """A convenience function to get standard summary statistics useful
+    for describing most data. See :meth:`Stats.describe` for more
+    details.
+
+    >>> print(describe(range(7), format='text'))
+    count:    7
+    mean:     3.0
+    std_dev:  2.0
+    min:      0
+    0.25:     1.5
+    0.5:      3
+    0.75:     4.5
+    max:      6
+
+    """
+    return Stats(data).describe(quantiles=quantiles, format=format)
+
 
 def _get_conv_func(attr_name):
     def stats_helper(data, default=0.0):
@@ -384,6 +549,8 @@ def _get_conv_func(attr_name):
 
 for attr_name, attr in list(Stats.__dict__.items()):
     if isinstance(attr, _StatsProperty):
+        if attr_name in ('max', 'min', 'count'):  # don't shadow builtins
+            continue
         func = _get_conv_func(attr_name)
         func.__doc__ = attr.func.__doc__
         globals()[attr_name] = func
